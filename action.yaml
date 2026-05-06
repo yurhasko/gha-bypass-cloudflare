@@ -1,0 +1,64 @@
+name: Temporary Cloudflare Access
+description: Temporarily grants the current GitHub Actions runner access through Cloudflare controls.
+branding:
+  icon: shield-off
+  color: blue
+inputs:
+  accountId:
+    description: "Cloudflare account ID"
+    required: true
+  zoneId:
+    description: "Cloudflare zone ID"
+    required: true
+  apiToken:
+    description: "Cloudflare API token"
+    required: true
+  disableBotFightMode:
+    description: "Temporarily disable Bot Fight Mode for the duration of the job (requires Bot Management Read/Write)"
+    required: false
+    default: "false"
+  botFightModePropagationDelaySeconds:
+    description: "Seconds to wait after changing Bot Fight Mode settings"
+    required: false
+    default: "10"
+  publicIpMaxAttempts:
+    description: "Maximum number of public IP provider requests before failing"
+    required: false
+    default: "6"
+  publicIpRequestTimeoutMs:
+    description: "Timeout in milliseconds for each public IP provider request"
+    required: false
+    default: "5000"
+  cloudflareRequestTimeoutMs:
+    description: "Timeout in milliseconds for each Cloudflare API call"
+    required: false
+    default: "30000"
+  listOperationTimeoutMs:
+    description: "Maximum time in milliseconds to wait for Cloudflare list bulk operations"
+    required: false
+    default: "120000"
+  listOperationPollIntervalMs:
+    description: "Interval in milliseconds between Cloudflare list bulk operation status checks"
+    required: false
+    default: "2000"
+  publicIpProviderUrls:
+    description: "Comma or newline separated HTTPS public IP provider URLs"
+    required: false
+    default: |
+      https://api64.ipify.org?format=json
+      https://api.ipify.org?format=json
+      https://checkip.amazonaws.com
+      https://icanhazip.com
+      https://ident.me
+outputs:
+  publicIp:
+    description: "Public IP address detected for the runner"
+  listId:
+    description: "Cloudflare list ID used by this action"
+  listCreated:
+    description: "Whether this run created the Cloudflare list"
+runs:
+  using: node24
+  main: src/main.js
+  post: src/post.js
+  post-if: always()

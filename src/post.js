@@ -1,0 +1,90 @@
+"use strict";
+
+const { CloudflareClient } = require("./lib/cloudflare");
+const github = require("./lib/github");
+
+async function run() {
+  const token = github.getState("apiToken");
+  const accountId = github.getState("accountId");
+  const zoneId = github.getState("zoneId");
+  const listId = github.getState("listId");
+  const timeoutMs = Number(github.getState("cloudflareRequestTimeoutMs") || 30000);
+  const listOperationTimeoutMs = Number(github.getState("listOperationTimeoutMs") || 120000);
+  const listOperationPollIntervalMs = Number(github.getState("listOperationPollIntervalMs") || 2000);
+  const restoreBotFightMode = github.getState("restoreBotFightMode") === "true";
+
+  if (token) {
+    github.addMask(token);
+  }
+
+  const cloudflare = new CloudflareClient({ token, timeoutMs });
+  const cleanupErrors = [];
+
+  await github.group("Remove temporary runner access", async () => {
+    if (!accountId || !listId || !token) {
+      github.warning("Skipping list cleanup because required action state is missing.");
+      return;
+    }
+
+    try {
+      await cloudflare.replaceListItemsAndWait(accountId, listId, [], {
+        timeoutMs: listOperationTimeoutMs,
+        pollIntervalMs: listOperationPollIntervalMs
+      });
+      github.info(`Cleared Cloudflare list: ${listId}`);
+    } catch (error) {
+      cleanupErrors.push(error);
+      github.warning(`Failed to clear Cloudflare list: ${error.message}`);
+    }
+  });
+
+  if (restoreBotFightMode) {
+    await github.group("Restore Bot Fight Mode", async () => {
+      if (!zoneId || !token) {
+        const error = new Error("Missing Cloudflare zone or token state.");
+        cleanupErrors.push(error);
+        github.warning(error.message);
+        return;
+      }
+
+      const savedJson = github.getState("botManagementSettings");
+      if (!savedJson) {
+        const error = new Error("Missing saved Bot Management settings; cannot restore.");
+        cleanupErrors.push(error);
+        github.warning(error.message);
+        return;
+      }
+
+      let saved;
+      try {
+        saved = JSON.parse(savedJson);
+      } catch (error) {
+        cleanupErrors.push(error);
+        github.warning(`Could not parse saved Bot Management state: ${error.message}`);
+        return;
+      }
+
+      try {
+        await cloudflare.updateBotManagement(zoneId, saved);
+        github.info("Restored Bot Fight Mode settings.");
+      } catch (error) {
+        cleanupErrors.push(error);
+        github.warning(`Failed to restore Bot Fight Mode: ${error.message}`);
+      }
+    });
+  }
+
+  if (cleanupErrors.length > 0) {
+    throw new Error(`Cleanup completed with ${cleanupErrors.length} error(s).`);
+  }
+}
+
+if (require.main === module) {
+  run().catch((error) => {
+    github.fail(error);
+  });
+}
+
+module.exports = {
+  run
+};
