@@ -100,6 +100,55 @@ class CloudflareClient {
     return requireResult(response, "Cloudflare did not return the created rule.");
   }
 
+  async createZoneAccessRule(zoneId, { ip, notes }) {
+    const response = await this.request("POST", `/zones/${zoneId}/firewall/access_rules/rules`, {
+      mode: "whitelist",
+      configuration: {
+        target: "ip",
+        value: ip
+      },
+      notes
+    });
+
+    return requireResult(response, "Cloudflare did not return the created IP Access Rule.");
+  }
+
+  async getZoneAccessRule(zoneId, ruleId) {
+    const response = await this.request(
+      "GET",
+      `/zones/${zoneId}/firewall/access_rules/rules/${ruleId}`,
+      undefined,
+      { allowNotFound: true }
+    );
+
+    return response ? response.result : null;
+  }
+
+  async deleteZoneAccessRule(zoneId, ruleId) {
+    await this.request("DELETE", `/zones/${zoneId}/firewall/access_rules/rules/${ruleId}`, undefined, {
+      allowNotFound: true
+    });
+  }
+
+  async waitForZoneAccessRule(zoneId, ruleId, { timeoutMs, pollIntervalMs }) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (true) {
+      const rule = await this.getZoneAccessRule(zoneId, ruleId);
+
+      if (rule) {
+        return rule;
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`Timed out waiting for Cloudflare IP Access Rule ${ruleId} to become visible.`);
+      }
+
+      await sleep(Math.min(pollIntervalMs, remainingMs));
+    }
+  }
+
   async getBotManagement(zoneId) {
     const response = await this.request("GET", `/zones/${zoneId}/bot_management`);
     return response.result || {};

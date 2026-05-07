@@ -1,13 +1,16 @@
 "use strict";
 
 const { CloudflareClient } = require("./lib/cloudflare");
+const { BYPASS_STRATEGIES } = require("./lib/constants");
 const github = require("./lib/github");
 
 async function run() {
   const token = github.getState("apiToken");
+  const strategy = github.getState("strategy") || BYPASS_STRATEGIES.RULE_LIST;
   const accountId = github.getState("accountId");
   const zoneId = github.getState("zoneId");
   const listId = github.getState("listId");
+  const accessRuleId = github.getState("accessRuleId");
   const timeoutMs = Number(github.getState("cloudflareRequestTimeoutMs") || 30000);
   const listOperationTimeoutMs = Number(github.getState("listOperationTimeoutMs") || 120000);
   const listOperationPollIntervalMs = Number(github.getState("listOperationPollIntervalMs") || 2000);
@@ -21,21 +24,23 @@ async function run() {
   const cleanupErrors = [];
 
   await github.group("Remove temporary runner access", async () => {
-    if (!accountId || !listId || !token) {
-      github.warning("Skipping list cleanup because required action state is missing.");
+    if (strategy === BYPASS_STRATEGIES.RULE_LIST) {
+      await cleanupRuleList(
+        cloudflare,
+        { accountId, listId, token, listOperationTimeoutMs, listOperationPollIntervalMs },
+        cleanupErrors
+      );
       return;
     }
 
-    try {
-      await cloudflare.replaceListItemsAndWait(accountId, listId, [], {
-        timeoutMs: listOperationTimeoutMs,
-        pollIntervalMs: listOperationPollIntervalMs
-      });
-      github.info(`Cleared Cloudflare list: ${listId}`);
-    } catch (error) {
-      cleanupErrors.push(error);
-      github.warning(`Failed to clear Cloudflare list: ${error.message}`);
+    if (strategy === BYPASS_STRATEGIES.ACCESS_RULE) {
+      await cleanupAccessRule(cloudflare, { zoneId, accessRuleId, token }, cleanupErrors);
+      return;
     }
+
+    const error = new Error(`Unknown cleanup strategy: ${strategy}`);
+    cleanupErrors.push(error);
+    github.warning(error.message);
   });
 
   if (restoreBotFightMode) {
@@ -79,6 +84,41 @@ async function run() {
   }
 }
 
+async function cleanupRuleList(cloudflare, options, cleanupErrors) {
+  const { accountId, listId, token, listOperationTimeoutMs, listOperationPollIntervalMs } = options;
+
+  if (!accountId || !listId || !token) {
+    github.warning("Skipping list cleanup because required action state is missing.");
+    return;
+  }
+
+  try {
+    await cloudflare.replaceListItemsAndWait(accountId, listId, [], {
+      timeoutMs: listOperationTimeoutMs,
+      pollIntervalMs: listOperationPollIntervalMs
+    });
+    github.info(`Cleared Cloudflare list: ${listId}`);
+  } catch (error) {
+    cleanupErrors.push(error);
+    github.warning(`Failed to clear Cloudflare list: ${error.message}`);
+  }
+}
+
+async function cleanupAccessRule(cloudflare, { zoneId, accessRuleId, token }, cleanupErrors) {
+  if (!zoneId || !accessRuleId || !token) {
+    github.warning("Skipping IP Access Rule cleanup because required action state is missing.");
+    return;
+  }
+
+  try {
+    await cloudflare.deleteZoneAccessRule(zoneId, accessRuleId);
+    github.info(`Deleted temporary IP Access Rule: ${accessRuleId}`);
+  } catch (error) {
+    cleanupErrors.push(error);
+    github.warning(`Failed to delete temporary IP Access Rule: ${error.message}`);
+  }
+}
+
 if (require.main === module) {
   run().catch((error) => {
     github.fail(error);
@@ -86,5 +126,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  cleanupAccessRule,
+  cleanupRuleList,
   run
 };

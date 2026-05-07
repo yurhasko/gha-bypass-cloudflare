@@ -79,6 +79,68 @@ test("post run restores Bot Management from saved JSON state", async () => {
   }
 });
 
+test("post run deletes temporary IP Access Rules for accessRule strategy", async () => {
+  const cloudflarePath = require.resolve("../src/lib/cloudflare");
+  const githubPath = require.resolve("../src/lib/github");
+  const postPath = require.resolve("../src/post");
+  const calls = [];
+
+  class FakeCloudflareClient {
+    async deleteZoneAccessRule(zoneId, ruleId) {
+      calls.push({ zoneId, ruleId });
+    }
+  }
+
+  const fakeGithub = {
+    addMask: () => {},
+    fail: (error) => {
+      throw error;
+    },
+    getState: (name) => ({
+      strategy: "accessRule",
+      zoneId: "zone",
+      apiToken: "token",
+      cloudflareRequestTimeoutMs: "30000",
+      accessRuleId: "rule-1"
+    })[name] || "",
+    group: async (_name, callback) => callback(),
+    info: () => {},
+    warning: () => {}
+  };
+
+  const previousCloudflare = require.cache[cloudflarePath];
+  const previousGithub = require.cache[githubPath];
+  const previousPost = require.cache[postPath];
+
+  require.cache[cloudflarePath] = {
+    id: cloudflarePath,
+    filename: cloudflarePath,
+    loaded: true,
+    exports: { CloudflareClient: FakeCloudflareClient }
+  };
+  require.cache[githubPath] = {
+    id: githubPath,
+    filename: githubPath,
+    loaded: true,
+    exports: fakeGithub
+  };
+  delete require.cache[postPath];
+
+  try {
+    const { run } = require("../src/post");
+    await run();
+
+    assert.deepEqual(calls, [{
+      zoneId: "zone",
+      ruleId: "rule-1"
+    }]);
+  } finally {
+    restoreCache(cloudflarePath, previousCloudflare);
+    restoreCache(githubPath, previousGithub);
+    restoreCache(postPath, previousPost);
+  }
+});
+
 function restoreCache(path, value) {
   if (value) {
     require.cache[path] = value;

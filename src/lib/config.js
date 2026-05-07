@@ -1,10 +1,14 @@
 "use strict";
 
 const { parseProviderUrls } = require("./public-ip");
+const { BYPASS_STRATEGIES } = require("./constants");
 
 function readConfiguration() {
+  const strategy = readChoiceInput("strategy", BYPASS_STRATEGIES.RULE_LIST, Object.values(BYPASS_STRATEGIES));
+
   return {
-    accountId: readInput("accountId", { required: true }),
+    strategy,
+    accountId: readInput("accountId", { required: strategy === BYPASS_STRATEGIES.RULE_LIST }),
     zoneId: readInput("zoneId", { required: true }),
     apiToken: readInput("apiToken", { required: true }),
     disableBotFightMode: readBooleanInput("disableBotFightMode", false),
@@ -49,8 +53,19 @@ function readIntegerInput(name, fallback, { min }) {
   return value;
 }
 
+function readChoiceInput(name, fallback, choices) {
+  const value = readInput(name) || fallback;
+
+  if (!choices.includes(value)) {
+    throw new Error(`Input ${name} must be one of: ${choices.join(", ")}.`);
+  }
+
+  return value;
+}
+
 module.exports = {
   readBooleanInput,
+  readChoiceInput,
   readConfiguration,
   readInput,
   readIntegerInput

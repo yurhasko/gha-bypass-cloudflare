@@ -62,3 +62,89 @@ test("waitForListOperation rejects failed operations", async () => {
     /bad list item/
   );
 });
+
+test("createZoneAccessRule sends Cloudflare IP Access Rule payloads", async () => {
+  const client = new CloudflareClient({ token: "token", timeoutMs: 1000 });
+  const calls = [];
+  client.request = async (method, path, body) => {
+    calls.push({ method, path, body });
+    return { result: { id: "rule-1" } };
+  };
+
+  assert.deepEqual(await client.createZoneAccessRule("zone", {
+    ip: "203.0.113.10",
+    notes: "temporary access"
+  }), {
+    id: "rule-1"
+  });
+
+  assert.deepEqual(calls, [{
+    method: "POST",
+    path: "/zones/zone/firewall/access_rules/rules",
+    body: {
+      mode: "whitelist",
+      configuration: {
+        target: "ip",
+        value: "203.0.113.10"
+      },
+      notes: "temporary access"
+    }
+  }]);
+});
+
+test("getZoneAccessRule fetches the access rule by ID", async () => {
+  const client = new CloudflareClient({ token: "token", timeoutMs: 1000 });
+  const calls = [];
+  client.request = async (method, path, body, options) => {
+    calls.push({ method, path, body, options });
+    return { result: { id: "rule-1" } };
+  };
+
+  assert.deepEqual(await client.getZoneAccessRule("zone", "rule-1"), { id: "rule-1" });
+  assert.deepEqual(calls, [{
+    method: "GET",
+    path: "/zones/zone/firewall/access_rules/rules/rule-1",
+    body: undefined,
+    options: { allowNotFound: true }
+  }]);
+});
+
+test("getZoneAccessRule returns null while the rule is still propagating", async () => {
+  const client = new CloudflareClient({ token: "token", timeoutMs: 1000 });
+  client.request = async () => null;
+
+  assert.equal(await client.getZoneAccessRule("zone", "rule-1"), null);
+});
+
+test("waitForZoneAccessRule polls by ID and returns the rule once visible", async () => {
+  const client = new CloudflareClient({ token: "token", timeoutMs: 1000 });
+  let calls = 0;
+  client.getZoneAccessRule = async () => {
+    calls += 1;
+    return calls === 1 ? null : { id: "rule-1" };
+  };
+
+  assert.deepEqual(await client.waitForZoneAccessRule("zone", "rule-1", {
+    timeoutMs: 1000,
+    pollIntervalMs: 1
+  }), {
+    id: "rule-1"
+  });
+});
+
+test("deleteZoneAccessRule treats missing cleanup targets as already clean", async () => {
+  const client = new CloudflareClient({ token: "token", timeoutMs: 1000 });
+  const calls = [];
+  client.request = async (method, path, body, options) => {
+    calls.push({ method, path, body, options });
+  };
+
+  await client.deleteZoneAccessRule("zone", "rule-1");
+
+  assert.deepEqual(calls, [{
+    method: "DELETE",
+    path: "/zones/zone/firewall/access_rules/rules/rule-1",
+    body: undefined,
+    options: { allowNotFound: true }
+  }]);
+});

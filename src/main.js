@@ -3,7 +3,15 @@
 const { setTimeout: sleep } = require("node:timers/promises");
 const { CloudflareClient } = require("./lib/cloudflare");
 const { readConfiguration } = require("./lib/config");
-const { ACCESS_LIST_DESCRIPTION, ACCESS_LIST_NAME, BYPASS_RULE_DESCRIPTION } = require("./lib/constants");
+const {
+  ACCESS_LIST_DESCRIPTION,
+  ACCESS_LIST_NAME,
+  ACCESS_RULE_NOTE,
+  ACCESS_RULE_PROPAGATION_POLL_INTERVAL_MS,
+  ACCESS_RULE_PROPAGATION_TIMEOUT_MS,
+  BYPASS_RULE_DESCRIPTION,
+  BYPASS_STRATEGIES
+} = require("./lib/constants");
 const github = require("./lib/github");
 const { resolvePublicIp } = require("./lib/public-ip");
 
@@ -12,6 +20,7 @@ const READ_ONLY_BOT_MANAGEMENT_FIELDS = new Set(["using_latest_model"]);
 async function run() {
   const config = readConfiguration();
   github.addMask(config.apiToken);
+  github.setOutput("strategy", config.strategy);
 
   const cloudflare = new CloudflareClient({
     token: config.apiToken,
@@ -31,45 +40,15 @@ async function run() {
     return address;
   });
 
-  const list = await github.group("Prepare Cloudflare resources", async () => {
-    const result = await ensureAccessList(cloudflare, config.accountId);
+  let list;
 
-    if (result.created) {
-      try {
-        await ensureAccessRule(cloudflare, config.zoneId);
-      } catch (error) {
-        github.warning(
-          `WAF rule creation failed; rolling back the just-created list ${result.id} so the next run can retry setup.`
-        );
-        try {
-          await cloudflare.deleteList(config.accountId, result.id);
-          github.info(`Deleted Cloudflare list ${result.id}.`);
-        } catch (deleteError) {
-          github.warning(
-            `Best-effort delete of list ${result.id} failed; remove it manually before retrying: ${deleteError.message}`
-          );
-        }
-        throw error;
-      }
-    } else {
-      github.info("Cloudflare list already exists; setup-only rule creation skipped.");
-    }
-
-    github.info(`${result.created ? "Created" : "Using"} Cloudflare list: ${result.id}`);
-    github.exportVariable("TEMPORARY_CLOUDFLARE_ACCESS_LIST_ID", result.id);
-    github.exportVariable("TEMPORARY_CLOUDFLARE_ACCESS_LIST_CREATED", String(result.created));
-    github.setOutput("listId", result.id);
-    github.setOutput("listCreated", String(result.created));
-    github.saveState("accountId", config.accountId);
-    github.saveState("zoneId", config.zoneId);
-    github.saveState("apiToken", config.apiToken);
-    github.saveState("cloudflareRequestTimeoutMs", String(config.cloudflareRequestTimeoutMs));
-    github.saveState("listOperationTimeoutMs", String(config.listOperationTimeoutMs));
-    github.saveState("listOperationPollIntervalMs", String(config.listOperationPollIntervalMs));
-    github.saveState("listId", result.id);
-
-    return result;
-  });
+  if (config.strategy === BYPASS_STRATEGIES.RULE_LIST) {
+    list = await github.group("Prepare Cloudflare resources", async () => prepareRuleListStrategy(cloudflare, config));
+  } else if (config.strategy === BYPASS_STRATEGIES.ACCESS_RULE) {
+    await github.group("Allow current runner", async () => prepareAccessRuleStrategy(cloudflare, config, publicIp));
+  } else {
+    throw new Error(`Unsupported bypass strategy: ${config.strategy}`);
+  }
 
   if (config.disableBotFightMode) {
     await github.group("Temporarily adjust Bot Fight Mode", async () => {
@@ -95,18 +74,76 @@ async function run() {
     });
   }
 
-  await github.group("Allow current runner", async () => {
-    await cloudflare.replaceListItemsAndWait(
-      config.accountId,
-      list.id,
-      [{ ip: publicIp, comment: "GitHub Actions runner" }],
-      {
-        timeoutMs: config.listOperationTimeoutMs,
-        pollIntervalMs: config.listOperationPollIntervalMs
+  if (config.strategy === BYPASS_STRATEGIES.RULE_LIST) {
+    await github.group("Allow current runner", async () => {
+      await cloudflare.replaceListItemsAndWait(
+        config.accountId,
+        list.id,
+        [{ ip: publicIp, comment: "GitHub Actions runner" }],
+        {
+          timeoutMs: config.listOperationTimeoutMs,
+          pollIntervalMs: config.listOperationPollIntervalMs
+        }
+      );
+      github.info(`Cloudflare list now contains ${publicIp}.`);
+    });
+  }
+}
+
+async function prepareRuleListStrategy(cloudflare, config) {
+  const result = await ensureAccessList(cloudflare, config.accountId);
+
+  if (result.created) {
+    try {
+      await ensureAccessRule(cloudflare, config.zoneId);
+    } catch (error) {
+      github.warning(
+        `WAF rule creation failed; rolling back the just-created list ${result.id} so the next run can retry setup.`
+      );
+      try {
+        await cloudflare.deleteList(config.accountId, result.id);
+        github.info(`Deleted Cloudflare list ${result.id}.`);
+      } catch (deleteError) {
+        github.warning(
+          `Best-effort delete of list ${result.id} failed; remove it manually before retrying: ${deleteError.message}`
+        );
       }
-    );
-    github.info(`Cloudflare list now contains ${publicIp}.`);
+      throw error;
+    }
+  } else {
+    github.info("Cloudflare list already exists; setup-only rule creation skipped.");
+  }
+
+  github.info(`${result.created ? "Created" : "Using"} Cloudflare list: ${result.id}`);
+  github.exportVariable("TEMPORARY_CLOUDFLARE_ACCESS_LIST_ID", result.id);
+  github.exportVariable("TEMPORARY_CLOUDFLARE_ACCESS_LIST_CREATED", String(result.created));
+  github.setOutput("listId", result.id);
+  github.setOutput("listCreated", String(result.created));
+  saveCommonState(config);
+  github.saveState("listOperationTimeoutMs", String(config.listOperationTimeoutMs));
+  github.saveState("listOperationPollIntervalMs", String(config.listOperationPollIntervalMs));
+  github.saveState("listId", result.id);
+
+  return result;
+}
+
+async function prepareAccessRuleStrategy(cloudflare, config, publicIp) {
+  return createTemporaryZoneAccessRule(cloudflare, config.zoneId, publicIp, {
+    onCreated: (accessRule) => {
+      github.exportVariable("TEMPORARY_CLOUDFLARE_ACCESS_RULE_ID", accessRule.id);
+      github.setOutput("accessRuleId", accessRule.id);
+      saveCommonState(config);
+      github.saveState("accessRuleId", accessRule.id);
+    }
   });
+}
+
+function saveCommonState(config) {
+  github.saveState("strategy", config.strategy);
+  github.saveState("accountId", config.accountId);
+  github.saveState("zoneId", config.zoneId);
+  github.saveState("apiToken", config.apiToken);
+  github.saveState("cloudflareRequestTimeoutMs", String(config.cloudflareRequestTimeoutMs));
 }
 
 async function ensureAccessList(cloudflare, accountId) {
@@ -159,12 +196,31 @@ async function ensureAccessRule(cloudflare, zoneId) {
   );
 
   if (duplicate) {
-    github.info(`Access rule already exists: ${duplicate.id}`);
+    github.info(`WAF skip rule already exists: ${duplicate.id}`);
     return;
   }
 
   const createdRule = await cloudflare.createRulesetRule(zoneId, entrypoint.id, rule);
-  github.info(`Created access rule: ${createdRule.id}`);
+  github.info(`Created WAF skip rule: ${createdRule.id}`);
+}
+
+async function createTemporaryZoneAccessRule(cloudflare, zoneId, publicIp, options = {}) {
+  const rule = await cloudflare.createZoneAccessRule(zoneId, {
+    ip: publicIp,
+    notes: ACCESS_RULE_NOTE
+  });
+
+  if (options.onCreated) {
+    await options.onCreated(rule);
+  }
+
+  await cloudflare.waitForZoneAccessRule(zoneId, rule.id, {
+    timeoutMs: ACCESS_RULE_PROPAGATION_TIMEOUT_MS,
+    pollIntervalMs: ACCESS_RULE_PROPAGATION_POLL_INTERVAL_MS
+  });
+
+  github.info(`Created temporary IP Access Rule: ${rule.id}`);
+  return rule;
 }
 
 function stripReadOnlyBotManagementFields(settings) {
@@ -184,7 +240,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  createTemporaryZoneAccessRule,
   ensureAccessList,
   ensureAccessRule,
+  prepareAccessRuleStrategy,
+  prepareRuleListStrategy,
   stripReadOnlyBotManagementFields
 };

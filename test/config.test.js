@@ -5,6 +5,7 @@ const test = require("node:test");
 const { readConfiguration } = require("../src/lib/config");
 
 const ACTION_INPUT_NAMES = [
+  "strategy",
   "accountId",
   "zoneId",
   "apiToken",
@@ -20,6 +21,7 @@ const ACTION_INPUT_NAMES = [
 
 test("readConfiguration uses Cloudflare-style camelCase action inputs", () => {
   withActionInputs({
+    strategy: "accessRule",
     accountId: "account-id",
     zoneId: "zone-id",
     apiToken: "token",
@@ -33,6 +35,7 @@ test("readConfiguration uses Cloudflare-style camelCase action inputs", () => {
     publicIpProviderUrls: "https://one.example/ip, https://two.example/ip"
   }, () => {
     assert.deepEqual(readConfiguration(), {
+      strategy: "accessRule",
       accountId: "account-id",
       zoneId: "zone-id",
       apiToken: "token",
@@ -45,6 +48,45 @@ test("readConfiguration uses Cloudflare-style camelCase action inputs", () => {
       listOperationPollIntervalMs: 500,
       publicIpProviderUrls: ["https://one.example/ip", "https://two.example/ip"]
     });
+  });
+});
+
+test("readConfiguration defaults to the ruleList strategy", () => {
+  withActionInputs({
+    accountId: "account-id",
+    zoneId: "zone-id",
+    apiToken: "token"
+  }, () => {
+    assert.equal(readConfiguration().strategy, "ruleList");
+  });
+});
+
+test("readConfiguration rejects unknown bypass strategies", () => {
+  withActionInputs({
+    strategy: "unknown",
+    accountId: "account-id",
+    zoneId: "zone-id",
+    apiToken: "token"
+  }, () => {
+    assert.throws(() => readConfiguration(), /strategy.*ruleList, accessRule/);
+  });
+});
+
+test("readConfiguration requires accountId only for the ruleList strategy", () => {
+  withActionInputs({
+    strategy: "accessRule",
+    zoneId: "zone-id",
+    apiToken: "token"
+  }, () => {
+    assert.equal(readConfiguration().accountId, "");
+  });
+
+  withActionInputs({
+    strategy: "ruleList",
+    zoneId: "zone-id",
+    apiToken: "token"
+  }, () => {
+    assert.throws(() => readConfiguration(), /Missing required input: accountId/);
   });
 });
 

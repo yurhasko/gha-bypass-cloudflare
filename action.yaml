@@ -4,9 +4,13 @@ branding:
   icon: shield-off
   color: blue
 inputs:
+  strategy:
+    description: "Cloudflare bypass strategy: ruleList or accessRule"
+    required: false
+    default: "ruleList"
   accountId:
-    description: "Cloudflare account ID"
-    required: true
+    description: "Cloudflare account ID; required when strategy is ruleList"
+    required: false
   zoneId:
     description: "Cloudflare zone ID"
     required: true
@@ -51,12 +55,16 @@ inputs:
       https://icanhazip.com
       https://ident.me
 outputs:
+  strategy:
+    description: "Cloudflare bypass strategy used by this run"
   publicIp:
     description: "Public IP address detected for the runner"
   listId:
-    description: "Cloudflare list ID used by this action"
+    description: "Cloudflare list ID used by the ruleList strategy"
   listCreated:
     description: "Whether this run created the Cloudflare list"
+  accessRuleId:
+    description: "Cloudflare zone IP Access Rule ID created by the accessRule strategy"
 runs:
   using: node24
   main: src/main.js

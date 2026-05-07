@@ -1,6 +1,6 @@
 # Cloudflare bypass GitHub Action
 
-GitHub Action that temporarily allows the current GitHub-hosted runner through Cloudflare: creates or reuses a Cloudflare account rule list, puts the runner public IP into that list for the duration of the job, and clears the list in the post step. On first setup it also creates the WAF custom rule that references the list.
+GitHub Action that temporarily allows the current GitHub-hosted runner through Cloudflare. The default strategy uses a Cloudflare account rule list plus a WAF skip rule. A second strategy is available for zones where a short-lived Cloudflare IP Access Rule is a better operational fit.
 
 ## Use case
 
@@ -12,11 +12,22 @@ Typical examples:
 - deployment verification through a proxied hostname
 - CI requests to admin endpoints that should stay protected from the public internet
 
+## Strategies
+
+Use `strategy: ruleList` when you want the WAF custom-rule based flow Cloudflare recommends for IP-list matching. Use `strategy: accessRule` when you prefer one temporary, per-run IP Access Rule and want to avoid the shared-list concurrency constraint.
+
+| Strategy | What it does | Best fit |
+| --- | --- | --- |
+| `ruleList` | Creates or reuses one account-level IP list, creates a WAF skip rule on first setup, replaces the list with the runner IP during the job, and clears the list in the post step. | Current Cloudflare WAF/rate-limit bypass flow. Default. |
+| `accessRule` | Creates one zone-level IP Access Rule for the runner IP and deletes that rule in the post step. | Simpler per-run allowlisting without the shared-list concurrency issue. |
+
+`accessRule` does not create a WAF ruleset rule and does not use account rule lists. It is a different Cloudflare control plane path, so do not assume it bypasses the same products as `ruleList` on every zone.
+
 ## Requirements
 
 The action requires a Cloudflare **API token**. Do not use the global API key.
 
-Minimum permissions for regular runs:
+Minimum permissions for `strategy: ruleList` regular runs:
 
 ```text
 Account > Account Rule Lists > Read
@@ -30,6 +41,15 @@ Zone > Zone WAF > Read
 Zone > Zone WAF > Write
 ```
 
+Minimum permissions for `strategy: accessRule`:
+
+```text
+Zone > Firewall Services > Read
+Zone > Firewall Services > Write
+```
+
+Cloudflare dashboard wording varies. In some accounts this capability may be shown as IP Access Rules or Firewall Access Rules.
+
 Additional permissions when `disableBotFightMode` is enabled:
 
 ```text
@@ -41,7 +61,7 @@ Scope the token to:
 
 ```text
 Account resources:
-  the Cloudflare account containing the zone
+  the Cloudflare account containing the zone, when using ruleList
 
 Zone resources:
   the specific zone used by the workflow
@@ -58,6 +78,8 @@ CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_ZONE_ID
 CLOUDFLARE_API_TOKEN
 ```
+
+`CLOUDFLARE_ACCOUNT_ID` is needed only by `strategy: ruleList`.
 
 Workflow:
 
@@ -86,9 +108,20 @@ jobs:
         run: curl --fail https://example.com/api/health
 ```
 
+IP Access Rule mode:
+
+```yaml
+- name: Allow runner through Cloudflare
+  uses: yurhasko/gha-bypass-cloudflare@v1
+  with:
+    strategy: accessRule
+    zoneId: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+    apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+```
+
 ## Concurrency
 
-The action manages a single shared list and replaces its contents on every run. Two jobs that run in parallel against the same Cloudflare account will overwrite each other's IPs, and either job's post step will leave the other without access.
+With `strategy: ruleList`, the action manages a single shared list and replaces its contents on every run. Two jobs that run in parallel against the same Cloudflare account will overwrite each other's IPs, and either job's post step will leave the other without access.
 
 Serialize runs with a workflow `concurrency` group when more than one job can hit the action at once:
 
@@ -108,6 +141,8 @@ jobs:
 ```
 
 Matrix jobs that need Cloudflare access must use the same `concurrency.group` value, or the protected work must run in one job after one bypass step. Do not put the bypass step in a separate setup job for downstream jobs; the action's post step runs when that setup job ends and clears the list before dependent jobs start.
+
+`strategy: accessRule` creates one IP Access Rule per action run, so it does not have the shared-list race. That makes it the better choice for parallel jobs when IP Access Rules bypass the Cloudflare controls that block your workflow. It can still hit Cloudflare limits if many jobs run at once or cleanup does not execute.
 
 ## Bot Fight Mode
 
@@ -136,7 +171,8 @@ Zone > Bot Management > Write
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `accountId` | yes | | Cloudflare account ID. |
+| `strategy` | no | `ruleList` | Cloudflare bypass strategy: `ruleList` or `accessRule`. |
+| `accountId` | for `ruleList` | | Cloudflare account ID. |
 | `zoneId` | yes | | Cloudflare zone ID. |
 | `apiToken` | yes | | Cloudflare API token. |
 | `disableBotFightMode` | no | `false` | Temporarily disable Bot Fight Mode and restore it in the post step. |
@@ -162,13 +198,15 @@ https://ident.me
 
 | Output | Description |
 | --- | --- |
+| `strategy` | Cloudflare bypass strategy used by the run. |
 | `publicIp` | Public IP detected for the runner. |
-| `listId` | Cloudflare rule list ID used by the action. |
-| `listCreated` | `true` if the action created the list in this run. |
+| `listId` | Cloudflare rule list ID used by `ruleList`. |
+| `listCreated` | `true` if `ruleList` created the list in this run. |
+| `accessRuleId` | Cloudflare IP Access Rule ID created by `accessRule`. |
 
 ## Cloudflare resources
 
-The action manages one account-level IP list:
+With `strategy: ruleList`, the action manages one account-level IP list:
 
 ```text
 github_actions_temporary_access
@@ -190,9 +228,19 @@ http_request_sbfm
 
 WAF rule creation is setup-only. If the list already exists, the action does not touch WAF rules.
 
+With `strategy: accessRule`, the action creates a zone-level IP Access Rule:
+
+```text
+mode: whitelist
+configuration.target: ip
+configuration.value: <runner public IP>
+```
+
+That rule is deleted in the post step. No account list or WAF custom rule is created.
+
 ## Permission reduction after setup
 
-After the first successful run, you can remove:
+After the first successful `ruleList` run, you can remove:
 
 ```text
 Zone > Zone WAF > Read
@@ -223,6 +271,8 @@ Account > Account Rule Lists > Write
 
 These permissions are account-level because Cloudflare rule lists are account resources.
 
+This endpoint is used only by `strategy: ruleList`.
+
 ### `GET /zones/{zoneId}/rulesets` or WAF rule creation fails
 
 The token is missing zone WAF permissions.
@@ -235,6 +285,23 @@ Zone > Zone WAF > Write
 ```
 
 These are only needed for first-time setup.
+
+This endpoint is used only by `strategy: ruleList`.
+
+### `/zones/{zoneId}/firewall/access_rules/rules` fails
+
+The token is missing permissions for Cloudflare IP Access Rules.
+
+Add:
+
+```text
+Zone > Firewall Services > Read
+Zone > Firewall Services > Write
+```
+
+Depending on the Cloudflare dashboard version, the same capability may be labeled as IP Access Rules or Firewall Access Rules.
+
+This endpoint is used only by `strategy: accessRule`.
 
 ### `GET /zones/{zoneId}/bot_management` fails
 
@@ -260,7 +327,7 @@ Fix it by either:
 
 ### First setup failed midway
 
-If the list was created in this run but WAF rule creation failed, the action best-effort deletes the just-created list before failing the step, so the next run can retry setup cleanly. If that delete itself fails, the action logs a warning identifying the list ID — remove it manually before retrying.
+If the list was created in this run but WAF rule creation failed, the action best-effort deletes the just-created list before failing the step, so the next run can retry setup cleanly. If that delete itself fails, the action logs a warning identifying the list ID; remove it manually before retrying.
 
 ### The list is not empty after a cancelled workflow
 
